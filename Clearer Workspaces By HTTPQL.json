@@ -1,0 +1,128 @@
+{
+  "description": "",
+  "edition": 2,
+  "graph": {
+    "edges": [
+      {
+        "source": {
+          "exec_alias": "exec",
+          "node_id": 2
+        },
+        "target": {
+          "exec_alias": "exec",
+          "node_id": 3
+        }
+      },
+      {
+        "source": {
+          "exec_alias": "exec",
+          "node_id": 3
+        },
+        "target": {
+          "exec_alias": "exec",
+          "node_id": 1
+        }
+      },
+      {
+        "source": {
+          "exec_alias": "exec",
+          "node_id": 4
+        },
+        "target": {
+          "exec_alias": "exec",
+          "node_id": 2
+        }
+      }
+    ],
+    "nodes": [
+      {
+        "alias": "convert_end",
+        "definition_id": "caido/convert-end",
+        "display": {
+          "x": 120,
+          "y": 10
+        },
+        "id": 1,
+        "inputs": [
+          {
+            "alias": "data",
+            "value": {
+              "data": "$javascript.data",
+              "kind": "ref"
+            }
+          }
+        ],
+        "name": "Convert End",
+        "version": "0.1.0"
+      },
+      {
+        "alias": "trim",
+        "definition_id": "caido/trim",
+        "display": {
+          "x": -980,
+          "y": 10
+        },
+        "id": 2,
+        "inputs": [
+          {
+            "alias": "kind",
+            "value": {
+              "data": "both",
+              "kind": "string"
+            }
+          },
+          {
+            "alias": "data",
+            "value": {
+              "data": "PEhUVFBRTCBIRVJFPg==",
+              "kind": "bytes"
+            }
+          }
+        ],
+        "name": "Trim",
+        "version": "0.1.0"
+      },
+      {
+        "alias": "javascript",
+        "definition_id": "caido/code-js",
+        "display": {
+          "x": -390,
+          "y": 10
+        },
+        "id": 3,
+        "inputs": [
+          {
+            "alias": "data",
+            "value": {
+              "data": "$trim.data",
+              "kind": "ref"
+            }
+          },
+          {
+            "alias": "code",
+            "value": {
+              "data": "import { spawn } from \"child_process\";\n\nexport async function run(input, sdk) {\n  // Helper function to convert byte array/object to string\n  function bytesToString(data) {\n    if (typeof data === 'string') return data;\n    if (Array.isArray(data)) {\n      return data.map(byte => String.fromCharCode(byte)).join('');\n    }\n    if (data && typeof data === 'object') {\n      // Handle object with numeric keys (character codes)\n      const keys = Object.keys(data).filter(k => !isNaN(parseInt(k))).sort((a, b) => parseInt(a) - parseInt(b));\n      if (keys.length > 0) {\n        return keys.map(k => String.fromCharCode(data[k])).join('');\n      }\n      // Handle data property\n      if (data.data) {\n        return bytesToString(data.data);\n      }\n      // Handle value property\n      if (data.value) {\n        return bytesToString(data.value);\n      }\n    }\n    return \"\";\n  }\n  \n  let filterClause = \"\";\n  \n  // Try to extract the query from different input formats\n  if (typeof input === 'string') {\n    filterClause = input;\n    sdk.console.log(\"[delete_by_httpql] Received query as string\");\n  } else if (input && typeof input === 'object') {\n    // Try data property (from Trim node)\n    if (input.data) {\n      filterClause = bytesToString(input.data);\n      sdk.console.log(\"[delete_by_httpql] Extracted query from input.data\");\n    }\n    // If not found, try direct bytes object\n    if (!filterClause) {\n      filterClause = bytesToString(input);\n      if (filterClause) {\n        sdk.console.log(\"[delete_by_httpql] Extracted query from direct byte array\");\n      }\n    }\n    // Try trim property\n    if (!filterClause && input.trim) {\n      filterClause = bytesToString(input.trim);\n      sdk.console.log(\"[delete_by_httpql] Extracted query from input.trim\");\n    }\n    // Try value property\n    if (!filterClause && input.value) {\n      filterClause = bytesToString(input.value);\n      sdk.console.log(\"[delete_by_httpql] Extracted query from input.value\");\n    }\n  }\n  \n  if (!filterClause) {\n    sdk.console.error(\"[delete_by_httpql] No HTTPQL query provided.\");\n    sdk.console.error(`[delete_by_httpql] Input type: ${typeof input}`);\n    return \"❌ No HTTPQL query provided. Please enter a valid HTTPQL query in the Trim node.\";\n  }\n\n  sdk.console.log(`[delete_by_httpql] Using HTTPQL query: ${filterClause}`);\n\n  async function sqliteRun(dbFile, sql, description = \"\") {\n    return new Promise((resolve, reject) => {\n      const proc = spawn(\"sqlite3\", [dbFile]);\n      let stdout = \"\";\n      let stderr = \"\";\n      proc.stdout.on(\"data\", (chunk) => {\n        stdout += chunk.toString();\n      });\n      proc.stderr.on(\"data\", (chunk) => {\n        stderr += chunk.toString();\n      });\n      proc.on(\"close\", (code) => {\n        if (code !== 0) {\n          reject(\n            new Error(\n              `${description || sql.substring(0, 50)}: ${stderr.trim() || stdout.trim()}`,\n            ),\n          );\n        } else {\n          const trimmed = stdout.trim();\n          if (description && trimmed.includes(\"rows_modified=\")) {\n            const changesMatch = trimmed.match(/rows_modified=(\\d+)/);\n            if (changesMatch) {\n              sdk.console.log(\n                `[${description}] rows modified: ${changesMatch[1]}`,\n              );\n            }\n          }\n          resolve(trimmed);\n        }\n      });\n      proc.on(\"error\", (err) => reject(err));\n      proc.stdin.write(sql);\n      proc.stdin.end();\n    });\n  }\n\n  async function executeSingle(dbFile, sql, description) {\n    const wrappedSql = `${sql.trim()}\\nSELECT 'rows_modified=' || changes();`;\n    return await sqliteRun(dbFile, wrappedSql, description);\n  }\n\n  async function executeWithTransaction(dbFile, operations, dbName) {\n    try {\n      await executeSingle(dbFile, \"BEGIN IMMEDIATE;\", `${dbName} - BEGIN`);\n    } catch (error) {\n      sdk.console.error(\n        `[${dbName}] Failed to start transaction: ${error.message}`,\n      );\n      throw error;\n    }\n\n    for (let i = 0; i < operations.length; i++) {\n      const op = operations[i];\n      try {\n        await executeSingle(dbFile, op.sql, `${dbName} - ${op.description}`);\n      } catch (error) {\n        sdk.console.error(`[${dbName}] Operation failed: ${op.description}`);\n        sdk.console.error(`[${dbName}] Error: ${error.message}`);\n\n        try {\n          await executeSingle(dbFile, \"ROLLBACK;\", `${dbName} - ROLLBACK`);\n          sdk.console.log(`[${dbName}] Transaction rolled back successfully`);\n        } catch (rollbackError) {\n          sdk.console.error(\n            `[${dbName}] Rollback failed: ${rollbackError.message}`,\n          );\n        }\n        throw error;\n      }\n    }\n\n    try {\n      await executeSingle(dbFile, \"COMMIT;\", `${dbName} - COMMIT`);\n    } catch (error) {\n      if (error.message.includes(\"no transaction is active\")) {\n        sdk.console.log(\n          `[${dbName}] Transaction already auto-committed (success)`,\n        );\n      } else {\n        throw error;\n      }\n    }\n  }\n\n  async function checkpointWAL(dbPath, dbRawPath) {\n    sdk.console.log(\"[delete_by_httpql] Forcing WAL checkpoint...\");\n\n    const checkpointSql = \"PRAGMA wal_checkpoint(TRUNCATE);\";\n\n    try {\n      const mainResult = await sqliteRun(dbPath, checkpointSql);\n      sdk.console.log(`[delete_by_httpql] Main DB checkpoint: ${mainResult}`);\n    } catch (error) {\n      sdk.console.warn(\n        `[delete_by_httpql] Main DB checkpoint failed: ${error.message}`,\n      );\n    }\n\n    try {\n      const rawResult = await sqliteRun(dbRawPath, checkpointSql);\n      sdk.console.log(`[delete_by_httpql] Raw DB checkpoint: ${rawResult}`);\n    } catch (error) {\n      sdk.console.warn(\n        `[delete_by_httpql] Raw DB checkpoint failed: ${error.message}`,\n      );\n    }\n  }\n\n  async function vacuumDatabases(dbPath, dbRawPath) {\n    sdk.console.log(\n      \"[delete_by_httpql] Vacuuming databases to reclaim disk space...\",\n    );\n\n    try {\n      await executeSingle(dbPath, \"VACUUM;\", \"Vacuum main database\");\n      sdk.console.log(\"[delete_by_httpql] Main database vacuum complete\");\n    } catch (error) {\n      sdk.console.warn(\n        `[delete_by_httpql] Main database vacuum failed: ${error.message}`,\n      );\n    }\n\n    try {\n      await executeSingle(dbRawPath, \"VACUUM;\", \"Vacuum raw database\");\n      sdk.console.log(\"[delete_by_httpql] Raw database vacuum complete\");\n    } catch (error) {\n      sdk.console.warn(\n        `[delete_by_httpql] Raw database vacuum failed: ${error.message}`,\n      );\n    }\n  }\n\n  async function getDbSize(path) {\n    try {\n      const result = await sqliteRun(\n        path,\n        \"SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size();\",\n      );\n      return parseInt(result) || 0;\n    } catch {\n      return 0;\n    }\n  }\n\n  // ── 2. Get project paths ─────────────────────────────────────────────────\n  const project = await sdk.projects.getCurrent();\n  if (!project) {\n    sdk.console.error(\"[delete_by_httpql] No active project. Aborting.\");\n    return;\n  }\n\n  const projectPath = project.getPath();\n  const dbPath = `${projectPath}/database.caido`;\n  const dbRawPath = `${projectPath}/database_raw.caido`;\n  const projectId = project.getId();\n\n  sdk.console.log(`[delete_by_httpql] Project: ${projectId}`);\n  sdk.console.log(`[delete_by_httpql] DB: ${dbPath}`);\n  sdk.console.log(`[delete_by_httpql] Raw DB: ${dbRawPath}`);\n\n  // ── 3. Verify schema ─────────────────────────────────────────────────────\n  const tables = await sqliteRun(dbPath, \".tables\\n\");\n  if (!tables.includes(\"requests\")) {\n    sdk.console.error(\"[delete_by_httpql] FATAL: 'requests' table not found.\");\n    return;\n  }\n\n  // ── 4. Get database sizes before deletion ────────────────────────────────\n  const beforeMainSize = await getDbSize(dbPath);\n  const beforeRawSize = await getDbSize(dbRawPath);\n  sdk.console.log(\n    `[delete_by_httpql] Main DB size before: ${(beforeMainSize / 1024 / 1024).toFixed(2)} MB`,\n  );\n  sdk.console.log(\n    `[delete_by_httpql] Raw DB size before: ${(beforeRawSize / 1024 / 1024).toFixed(2)} MB`,\n  );\n\n  // ── 5. Fetch requests matching the HTTPQL query using GraphQL ────────────\n  sdk.console.log(\"[delete_by_httpql] Fetching requests matching HTTPQL query...\");\n\n  let matchedRequestIds = [];\n  let cursor = null;\n  let hasNextPage = true;\n\n  while (hasNextPage) {\n    try {\n      const query = `\n        query GetRequestsByFilter($filter: HTTPQL, $first: Int, $after: String) {\n          requests(first: $first, after: $after, filter: $filter) {\n            edges {\n              node {\n                id\n              }\n            }\n            pageInfo {\n              hasNextPage\n              endCursor\n            }\n          }\n        }\n      `;\n      \n      const variables = {\n        filter: filterClause,\n        first: 100,\n        after: cursor\n      };\n      \n      const result = await sdk.graphql.execute(query, variables);\n      \n      const edges = result?.data?.requests?.edges || result?.requests?.edges || [];\n      const pageInfo = result?.data?.requests?.pageInfo || result?.requests?.pageInfo || {};\n      \n      const ids = edges.map(edge => parseInt(edge.node.id));\n      matchedRequestIds = matchedRequestIds.concat(ids);\n      \n      hasNextPage = pageInfo.hasNextPage || false;\n      cursor = pageInfo.endCursor || null;\n      \n      sdk.console.log(`[delete_by_httpql] Fetched ${ids.length} requests (total: ${matchedRequestIds.length})`);\n    } catch (error) {\n      sdk.console.error(`[delete_by_httpql] GraphQL query failed: ${error.message}`);\n      sdk.console.error(`[delete_by_httpql] HTTPQL query may be invalid: ${filterClause}`);\n      return;\n    }\n  }\n\n  if (matchedRequestIds.length === 0) {\n    sdk.console.log(\"[delete_by_httpql] No requests match the HTTPQL query. Nothing to delete.\");\n    return;\n  }\n\n  sdk.console.log(`[delete_by_httpql] Requests matching query: ${matchedRequestIds.length}`);\n\n  // ── 6. Get additional data for matched requests using SQLite ─────────────\n  const idsPlaceholder = matchedRequestIds.join(\",\");\n  \n  const requestsData = await sqliteRun(\n    dbPath,\n    `SELECT id, host, raw_id, IFNULL(response_id, '') FROM requests WHERE id IN (${idsPlaceholder});\\n`,\n  );\n\n  const allRequests = requestsData\n    .split(\"\\n\")\n    .map((line) => {\n      const parts = line.split(\"|\");\n      return {\n        id: parseInt(parts[0]),\n        host: parts[1] || \"\",\n        raw_id: parts[2] ? parseInt(parts[2]) : null,\n        response_id: parts[3] ? parseInt(parts[3]) : null,\n      };\n    })\n    .filter((r) => !isNaN(r.id));\n\n  const requestIds = allRequests.map((r) => r.id);\n  const rawIds = allRequests.map((r) => r.raw_id).filter((id) => id != null);\n  const responseIds = allRequests\n    .map((r) => r.response_id)\n    .filter((id) => id != null);\n\n  // ── 7. Collect response raw_ids BEFORE deleting ──────────────────────────\n  let responseRawIds = [];\n  if (responseIds.length > 0) {\n    try {\n      const respRawOut = await sqliteRun(\n        dbPath,\n        `SELECT raw_id FROM responses WHERE id IN (${responseIds.join(\",\")});\\n`,\n      );\n      if (respRawOut) {\n        responseRawIds = respRawOut\n          .split(\"\\n\")\n          .map((l) => parseInt(l.trim()))\n          .filter((n) => !isNaN(n));\n      }\n    } catch (error) {\n      sdk.console.warn(\n        `[delete_by_httpql] Could not fetch response raw_ids: ${error.message}`,\n      );\n    }\n  }\n\n  const allRequestRawIds = [...new Set(rawIds.map(Number))];\n  const allResponseRawIds = [...new Set(responseRawIds.map(Number))];\n\n  sdk.console.log(\n    `[delete_by_httpql] Request IDs to delete: ${requestIds.length}`,\n  );\n  sdk.console.log(\n    `[delete_by_httpql] Response IDs to delete: ${responseIds.length}`,\n  );\n  sdk.console.log(\n    `[delete_by_httpql] requests_raw IDs to delete: ${allRequestRawIds.length} entries`,\n  );\n  sdk.console.log(\n    `[delete_by_httpql] responses_raw IDs to delete: ${allResponseRawIds.length} entries`,\n  );\n\n  // ── 8. Delete from database.caido ────────────────────────────────────────\n  const ids = requestIds.join(\",\");\n  const respIds = responseIds.length > 0 ? responseIds.join(\",\") : null;\n\n  sdk.console.log(\"[delete_by_httpql] === Starting database.caido deletions ===\");\n\n  const mainOperations = [];\n\n  if (requestIds.length > 0) {\n    mainOperations.push(\n      { sql: `UPDATE sitemap_entries SET request_id = NULL WHERE request_id IN (${ids});`, description: \"NULL sitemap_entries\" },\n      { sql: `UPDATE requests SET response_id = NULL, metadata_id = NULL WHERE id IN (${ids});`, description: \"NULL requests FK columns\" },\n      { sql: `DELETE FROM scoped_requests WHERE request_id IN (${ids});`, description: \"Delete scoped_requests\" },\n      { sql: `DELETE FROM scoped_intercept_entries WHERE intercept_entry_id IN (SELECT id FROM intercept_entries WHERE request_id IN (${ids}));`, description: \"Delete scoped_intercept_entries\" },\n      { sql: `DELETE FROM intercept_entries WHERE request_id IN (${ids});`, description: \"Delete intercept_entries\" },\n      { sql: `DELETE FROM automate_entry_requests WHERE request_id IN (${ids});`, description: \"Delete automate_entry_requests\" },\n      { sql: `DELETE FROM findings WHERE request_id IN (${ids});`, description: \"Delete findings\" },\n      { sql: `UPDATE replay_entries SET request_id = NULL WHERE request_id IN (${ids});`, description: \"NULL replay_entries\" },\n      { sql: `DELETE FROM requests WHERE id IN (${ids});`, description: \"Delete requests\" },\n      { sql: `DELETE FROM requests_metadata WHERE id NOT IN (SELECT metadata_id FROM requests WHERE metadata_id IS NOT NULL);`, description: \"Delete orphaned requests_metadata\" }\n    );\n  }\n\n  if (respIds) {\n    mainOperations.push({\n      sql: `DELETE FROM responses WHERE id IN (${respIds});`,\n      description: \"Delete responses\",\n    });\n  }\n\n  try {\n    await executeWithTransaction(dbPath, mainOperations, \"database.caido\");\n    sdk.console.log(\n      `[delete_by_httpql] database.caido: deleted ${requestIds.length} request(s), ${responseIds.length} response(s).`,\n    );\n  } catch (error) {\n    sdk.console.error(`[delete_by_httpql] database.caido deletion failed: ${error.message}`);\n  }\n\n  // ── 9. Delete from database_raw.caido ────────────────────────────────────\n  sdk.console.log(\"[delete_by_httpql] === Starting database_raw.caido deletions ===\");\n\n  const rawOperations = [];\n\n  if (allRequestRawIds.length > 0) {\n    rawOperations.push({\n      sql: `DELETE FROM requests_raw WHERE id IN (${allRequestRawIds.join(\",\")});`,\n      description: \"Delete requests_raw\",\n    });\n  }\n\n  if (allResponseRawIds.length > 0) {\n    rawOperations.push({\n      sql: `DELETE FROM responses_raw WHERE id IN (${allResponseRawIds.join(\",\")});`,\n      description: \"Delete responses_raw\",\n    });\n  }\n\n  if (rawOperations.length > 0) {\n    try {\n      await executeWithTransaction(dbRawPath, rawOperations, \"database_raw.caido\");\n      sdk.console.log(\n        `[delete_by_httpql] database_raw.caido: deleted ${allRequestRawIds.length} requests_raw blob(s), ` +\n          `${allResponseRawIds.length} responses_raw blob(s).`,\n      );\n    } catch (error) {\n      sdk.console.error(`[delete_by_httpql] database_raw.caido deletion failed: ${error.message}`);\n    }\n  } else {\n    sdk.console.log(\"[delete_by_httpql] No raw entries to delete.\");\n  }\n\n  // ── 10. Force WAL checkpoint and vacuum ───────────────────────────────────\n  await checkpointWAL(dbPath, dbRawPath);\n  await vacuumDatabases(dbPath, dbRawPath);\n\n  // ── 11. Show final sizes ─────────────────────────────────────────────────\n  const afterMainSize = await getDbSize(dbPath);\n  const afterRawSize = await getDbSize(dbRawPath);\n\n  sdk.console.log(\n    `[delete_by_httpql] Main DB size after: ${(afterMainSize / 1024 / 1024).toFixed(2)} MB (freed: ${((beforeMainSize - afterMainSize) / 1024 / 1024).toFixed(2)} MB)`,\n  );\n  sdk.console.log(\n    `[delete_by_httpql] Raw DB size after: ${(afterRawSize / 1024 / 1024).toFixed(2)} MB (freed: ${((beforeRawSize - afterRawSize) / 1024 / 1024).toFixed(2)} MB)`,\n  );\n\n  sdk.console.log(\n    `[delete_by_httpql] ✓ Done. Deleted ${requestIds.length} requests matching the HTTPQL query.`,\n  );\n  \n  return `✅ Deleted ${requestIds.length} requests matching HTTPQL query: \"${filterClause.substring(0, 100)}${filterClause.length > 100 ? '...' : ''}\". Please reselect your workspace (switch projects and switch back) to see the changes.`;\n}",
+              "kind": "string"
+            }
+          }
+        ],
+        "name": "JavaScript",
+        "version": "2.0.0"
+      },
+      {
+        "alias": "convert_start",
+        "definition_id": "caido/convert-start",
+        "display": {
+          "x": -1370,
+          "y": 10
+        },
+        "id": 4,
+        "name": "Convert Start",
+        "version": "0.1.0"
+      }
+    ]
+  },
+  "id": "e257c009-e796-4c92-9e31-4f429d5d0a6e",
+  "kind": "convert",
+  "name": "Clearer Workspaces By HTTPQL"
+}

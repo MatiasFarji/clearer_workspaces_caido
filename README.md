@@ -41,11 +41,11 @@ After running any workflow, you **MUST reselect your workspace** to see the chan
 
 ## 📋 Available Workflows
 
-| Workflow | Description | Status |
-|----------|-------------|--------|
-| **Clearer Workspaces By Scope** | Deletes requests outside configured scopes | ✅ Available |
-| **Delete by Filter Preset** | Deletes requests matching a saved filter preset | 🚧 Coming Soon |
-| **Delete by HTTPQL** | Deletes requests matching custom HTTPQL query | 🚧 Coming Soon |
+| Workflow | Workflow Type | Description | Status | 
+|----------|----------|-------------|--------|
+| **Clearer Workspaces By Scope** | Active | Deletes requests outside configured scopes | ✅ Available |
+| **Delete by Filter Preset** | Active | Deletes requests matching a saved filter preset | ✅ Available |
+| **Delete by HTTPQL** | Convert | Deletes requests matching custom HTTPQL query | ✅ Available |
 
 ## 🚀 Installation
 
