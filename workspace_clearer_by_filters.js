@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import path from "path";
 
 export async function run({ request }, sdk) {
   async function sqliteRun(dbFile, sql, description = "") {
@@ -134,14 +135,114 @@ export async function run({ request }, sdk) {
     }
   }
 
-  // ── 1. Get all filter presets using GraphQL ───────────────────────────────
-  sdk.console.log("[delete_by_filter] Fetching filter presets...");
+  // ── 1. Get currently active filter presets from config.db ─────────────────
+  sdk.console.log("[delete_by_filter] Reading active filters from config.db...");
 
-  let selectedPreset = null;
-  let filterPresets = [];
+  let selectedPresets = [];
+  let activeFilterGlobalIds = [];
+  let combinedClause = "";
 
   try {
-    const result = await sdk.graphql.execute(`
+    // Get current project path
+    const project = await sdk.projects.getCurrent();
+    if (!project) {
+      sdk.console.error("[delete_by_filter] No active project. Aborting.");
+      return;
+    }
+
+    const projectPath = project.getPath();
+    
+    // Go up 2 levels from project path to find Caido config directory
+    const configDir = path.resolve(projectPath, "../../");
+    const configDbPath = `${configDir}/config.db`;
+    
+    sdk.console.log(`[delete_by_filter] Project path: ${projectPath}`);
+    sdk.console.log(`[delete_by_filter] Config DB path: ${configDbPath}`);
+    
+    // Query the user_settings table
+    const configResult = await sqliteRun(
+      configDbPath,
+      "SELECT data FROM user_settings LIMIT 1;\n"
+    );
+    
+    if (!configResult) {
+      throw new Error("Could not read user_settings from config.db");
+    }
+    
+    // Parse the JSON data
+    const userData = JSON.parse(configResult);
+    const projects = userData.projects;
+    
+    const currentProjectId = project.getId();
+    
+    sdk.console.log(`[delete_by_filter] Current project ID: ${currentProjectId}`);
+    
+    const projectSettings = projects[currentProjectId];
+    
+    if (!projectSettings) {
+      throw new Error(`No settings found for project ${currentProjectId}`);
+    }
+    
+    // Check in intercept.filter.advanced (most reliable for active filters)
+    if (projectSettings.intercept?.filter?.advanced) {
+      const advancedFilters = projectSettings.intercept.filter.advanced;
+      sdk.console.log(`[delete_by_filter] Found ${advancedFilters.length} advanced filters in intercept`);
+      
+      const presetFilters = advancedFilters.filter(f => typeof f === 'string' && f.startsWith("gid://FilterPreset/"));
+      if (presetFilters.length > 0) {
+        activeFilterGlobalIds = presetFilters;
+        sdk.console.log(`[delete_by_filter] Found ${activeFilterGlobalIds.length} active filter(s) in intercept:`);
+        activeFilterGlobalIds.forEach(id => sdk.console.log(`  - ${id}`));
+      }
+    }
+    
+    // If no filters found in intercept, check in history.filter.advanced
+    if (activeFilterGlobalIds.length === 0 && projectSettings.history?.filter?.advanced) {
+      const advancedFilters = projectSettings.history.filter.advanced;
+      sdk.console.log(`[delete_by_filter] Found ${advancedFilters.length} advanced filters in history`);
+      
+      const presetFilters = advancedFilters.filter(f => typeof f === 'string' && f.startsWith("gid://FilterPreset/"));
+      if (presetFilters.length > 0) {
+        activeFilterGlobalIds = presetFilters;
+        sdk.console.log(`[delete_by_filter] Found ${activeFilterGlobalIds.length} active filter(s) in history:`);
+        activeFilterGlobalIds.forEach(id => sdk.console.log(`  - ${id}`));
+      }
+    }
+    
+    // If no filters found, check in sitemap.filter.advanced
+    if (activeFilterGlobalIds.length === 0 && projectSettings.sitemap?.filter?.advanced) {
+      const advancedFilters = projectSettings.sitemap.filter.advanced;
+      sdk.console.log(`[delete_by_filter] Found ${advancedFilters.length} advanced filters in sitemap`);
+      
+      const presetFilters = advancedFilters.filter(f => typeof f === 'string' && f.startsWith("gid://FilterPreset/"));
+      if (presetFilters.length > 0) {
+        activeFilterGlobalIds = presetFilters;
+        sdk.console.log(`[delete_by_filter] Found ${activeFilterGlobalIds.length} active filter(s) in sitemap:`);
+        activeFilterGlobalIds.forEach(id => sdk.console.log(`  - ${id}`));
+      }
+    }
+    
+    if (activeFilterGlobalIds.length === 0) {
+      sdk.console.warn("[delete_by_filter] No active filter presets found in config.db.");
+      sdk.console.warn("[delete_by_filter] Please enable at least one filter preset in the UI first.");
+      return "⚠️ No active filter presets found. Please enable filter presets in the Caido UI first.";
+    }
+    
+    // Extract numeric IDs from global IDs
+    const filterIds = [];
+    for (const globalId of activeFilterGlobalIds) {
+      const filterIdMatch = globalId.match(/gid:\/\/FilterPreset\/(\d+)/);
+      if (filterIdMatch) {
+        filterIds.push(filterIdMatch[1]);
+      } else {
+        sdk.console.warn(`[delete_by_filter] Could not extract ID from: ${globalId}`);
+      }
+    }
+    
+    sdk.console.log(`[delete_by_filter] Extracted filter IDs: ${filterIds.join(", ")}`);
+    
+    // Fetch all filter presets to get the full details
+    const presetsResult = await sdk.graphql.execute(`
       query filterPresets {
         filterPresets {
           id
@@ -152,28 +253,37 @@ export async function run({ request }, sdk) {
       }
     `);
     
-    // Extract presets from the response
-    filterPresets = result?.data?.filterPresets || [];
+    const allFilterPresets = presetsResult?.data?.filterPresets || [];
+    sdk.console.log(`[delete_by_filter] Found ${allFilterPresets.length} total filter presets`);
     
-    if (filterPresets.length === 0) {
-      sdk.console.warn("[delete_by_filter] No filter presets found.");
-      sdk.console.warn("[delete_by_filter] Please create a filter preset first (Intercept tab → Filter icon → Save as preset)");
-      return "⚠️ No filter presets found. Please create a filter preset first.";
+    // Find all matching presets
+    for (const filterId of filterIds) {
+      const preset = allFilterPresets.find(p => String(p.id) === String(filterId));
+      if (preset) {
+        selectedPresets.push(preset);
+        sdk.console.log(`[delete_by_filter] ✓ Active filter: "${preset.name}" (alias: ${preset.alias}, id: ${preset.id})`);
+        sdk.console.log(`[delete_by_filter]   Clause: ${preset.clause.substring(0, 100)}...`);
+      } else {
+        sdk.console.warn(`[delete_by_filter] Filter preset with ID ${filterId} not found`);
+      }
     }
     
-    sdk.console.log(`[delete_by_filter] Found ${filterPresets.length} filter preset(s):`);
-    filterPresets.forEach((preset) => {
-      sdk.console.log(`  - ${preset.name} (alias: ${preset.alias || 'none'})`);
-      sdk.console.log(`    Clause: ${preset.clause.substring(0, 100)}...`);
-    });
+    if (selectedPresets.length === 0) {
+      throw new Error("No matching filter presets found");
+    }
     
-    // Use the first preset (you can modify to select by name/alias)
-    selectedPreset = filterPresets[0];
-    sdk.console.log(`[delete_by_filter] Using filter preset: "${selectedPreset.name}"`);
-    sdk.console.log(`[delete_by_filter] Filter clause: ${selectedPreset.clause}`);
+    // Combine all filter clauses with AND
+    if (selectedPresets.length === 1) {
+      combinedClause = selectedPresets[0].clause;
+    } else {
+      const clauses = selectedPresets.map(p => `(${p.clause})`);
+      combinedClause = clauses.join(" AND ");
+    }
+    
+    sdk.console.log(`[delete_by_filter] Combined filter clause (${selectedPresets.length} filters): ${combinedClause.substring(0, 200)}...`);
     
   } catch (error) {
-    sdk.console.error(`[delete_by_filter] Failed to fetch filter presets: ${error.message}`);
+    sdk.console.error(`[delete_by_filter] Failed to get active filters: ${error.message}`);
     return;
   }
 
@@ -222,10 +332,39 @@ export async function run({ request }, sdk) {
     `[delete_by_filter] Raw DB size before: ${(beforeRawSize / 1024 / 1024).toFixed(2)} MB`,
   );
 
-  // ── 5. Fetch requests matching the filter using GraphQL ───────────────────
-  sdk.console.log("[delete_by_filter] Fetching requests matching filter...");
+  // ── 5. Fetch ALL requests from SQLite ────────────────────────────────────
+  sdk.console.log("[delete_by_filter] Fetching all requests from database...");
 
-  let matchedRequestIds = [];
+  const allRequestsRaw = await sqliteRun(
+    dbPath,
+    "SELECT id, host, raw_id, IFNULL(response_id, '') FROM requests;\n",
+  );
+
+  if (!allRequestsRaw) {
+    sdk.console.log("[delete_by_filter] No requests in DB. Nothing to do.");
+    return;
+  }
+
+  const allRequests = allRequestsRaw
+    .split("\n")
+    .map((line) => {
+      const parts = line.split("|");
+      return {
+        id: parseInt(parts[0]),
+        host: parts[1] || "",
+        raw_id: parts[2] ? parseInt(parts[2]) : null,
+        response_id: parts[3] ? parseInt(parts[3]) : null,
+      };
+    })
+    .filter((r) => !isNaN(r.id));
+
+  const allIds = new Set(allRequests.map(r => r.id));
+  sdk.console.log(`[delete_by_filter] Total requests in database: ${allIds.size}`);
+
+  // ── 6. Fetch requests that MATCH the combined filter (what filters SHOW) ──
+  sdk.console.log("[delete_by_filter] Fetching requests that match the active filters...");
+
+  let shownIds = new Set();
   let cursor = null;
   let hasNextPage = true;
 
@@ -248,66 +387,47 @@ export async function run({ request }, sdk) {
       `;
       
       const variables = {
-        filter: selectedPreset.clause,
+        filter: combinedClause,
         first: 100,
         after: cursor
       };
       
       const result = await sdk.graphql.execute(query, variables);
       
-      // Handle response structure
       const edges = result?.data?.requests?.edges || result?.requests?.edges || [];
       const pageInfo = result?.data?.requests?.pageInfo || result?.requests?.pageInfo || {};
       
-      const ids = edges.map(edge => parseInt(edge.node.id));
-      matchedRequestIds = matchedRequestIds.concat(ids);
+      edges.forEach(edge => shownIds.add(parseInt(edge.node.id)));
       
       hasNextPage = pageInfo.hasNextPage || false;
       cursor = pageInfo.endCursor || null;
       
-      sdk.console.log(`[delete_by_filter] Fetched ${ids.length} requests (total: ${matchedRequestIds.length})`);
+      sdk.console.log(`[delete_by_filter] Fetched ${edges.length} matching requests (total: ${shownIds.size})`);
     } catch (error) {
       sdk.console.error(`[delete_by_filter] GraphQL query failed: ${error.message}`);
-      sdk.console.error(`[delete_by_filter] Filter clause may be invalid: ${selectedPreset.clause}`);
       return;
     }
   }
 
-  if (matchedRequestIds.length === 0) {
-    sdk.console.log("[delete_by_filter] No requests match the selected filter. Nothing to delete.");
+  // ── 7. Calculate IDs to delete (requests that do NOT match the filter) ────
+  const idsToDelete = [...allIds].filter(id => !shownIds.has(id));
+  
+  sdk.console.log(`[delete_by_filter] Filter shows: ${shownIds.size} requests`);
+  sdk.console.log(`[delete_by_filter] Filter hides: ${idsToDelete.length} requests (these will be deleted)`);
+
+  if (idsToDelete.length === 0) {
+    sdk.console.log("[delete_by_filter] No requests to delete. Nothing to do.");
     return;
   }
 
-  sdk.console.log(`[delete_by_filter] Requests matching filter: ${matchedRequestIds.length}`);
+  // ── 8. Get full data for requests to delete ──────────────────────────────
+  const requestsToDelete = allRequests.filter(r => idsToDelete.includes(r.id));
 
-  // ── 6. Get additional data for matched requests using SQLite ─────────────
-  const idsPlaceholder = matchedRequestIds.join(",");
-  
-  const requestsData = await sqliteRun(
-    dbPath,
-    `SELECT id, host, raw_id, IFNULL(response_id, '') FROM requests WHERE id IN (${idsPlaceholder});\n`,
-  );
+  const requestIds = requestsToDelete.map(r => r.id);
+  const rawIds = requestsToDelete.map(r => r.raw_id).filter(id => id != null);
+  const responseIds = requestsToDelete.map(r => r.response_id).filter(id => id != null);
 
-  const allRequests = requestsData
-    .split("\n")
-    .map((line) => {
-      const parts = line.split("|");
-      return {
-        id: parseInt(parts[0]),
-        host: parts[1] || "",
-        raw_id: parts[2] ? parseInt(parts[2]) : null,
-        response_id: parts[3] ? parseInt(parts[3]) : null,
-      };
-    })
-    .filter((r) => !isNaN(r.id));
-
-  const requestIds = allRequests.map((r) => r.id);
-  const rawIds = allRequests.map((r) => r.raw_id).filter((id) => id != null);
-  const responseIds = allRequests
-    .map((r) => r.response_id)
-    .filter((id) => id != null);
-
-  // ── 7. Collect response raw_ids BEFORE deleting ──────────────────────────
+  // ── 9. Collect response raw_ids BEFORE deleting ──────────────────────────
   let responseRawIds = [];
   if (responseIds.length > 0) {
     try {
@@ -332,19 +452,19 @@ export async function run({ request }, sdk) {
   const allResponseRawIds = [...new Set(responseRawIds.map(Number))];
 
   sdk.console.log(
-    `[delete_by_filter] Request IDs: ${requestIds.length}`,
+    `[delete_by_filter] Request IDs to delete: ${requestIds.length}`,
   );
   sdk.console.log(
-    `[delete_by_filter] Response IDs: ${responseIds.length}`,
+    `[delete_by_filter] Response IDs to delete: ${responseIds.length}`,
   );
   sdk.console.log(
-    `[delete_by_filter] requests_raw IDs: ${allRequestRawIds.length} entries`,
+    `[delete_by_filter] requests_raw IDs to delete: ${allRequestRawIds.length} entries`,
   );
   sdk.console.log(
-    `[delete_by_filter] responses_raw IDs: ${allResponseRawIds.length} entries`,
+    `[delete_by_filter] responses_raw IDs to delete: ${allResponseRawIds.length} entries`,
   );
 
-  // ── 8. Delete from database.caido ────────────────────────────────────────
+  // ── 10. Delete from database.caido ───────────────────────────────────────
   const ids = requestIds.join(",");
   const respIds = responseIds.length > 0 ? responseIds.join(",") : null;
 
@@ -383,7 +503,7 @@ export async function run({ request }, sdk) {
     sdk.console.error(`[delete_by_filter] database.caido deletion failed: ${error.message}`);
   }
 
-  // ── 9. Delete from database_raw.caido ────────────────────────────────────
+  // ── 11. Delete from database_raw.caido ───────────────────────────────────
   sdk.console.log("[delete_by_filter] === Starting database_raw.caido deletions ===");
 
   const rawOperations = [];
@@ -416,11 +536,11 @@ export async function run({ request }, sdk) {
     sdk.console.log("[delete_by_filter] No raw entries to delete.");
   }
 
-  // ── 10. Force WAL checkpoint and vacuum ───────────────────────────────────
+  // ── 12. Force WAL checkpoint and vacuum ───────────────────────────────────
   await checkpointWAL(dbPath, dbRawPath);
   await vacuumDatabases(dbPath, dbRawPath);
 
-  // ── 11. Show final sizes ─────────────────────────────────────────────────
+  // ── 13. Show final sizes ─────────────────────────────────────────────────
   const afterMainSize = await getDbSize(dbPath);
   const afterRawSize = await getDbSize(dbRawPath);
 
@@ -431,9 +551,11 @@ export async function run({ request }, sdk) {
     `[delete_by_filter] Raw DB size after: ${(afterRawSize / 1024 / 1024).toFixed(2)} MB (freed: ${((beforeRawSize - afterRawSize) / 1024 / 1024).toFixed(2)} MB)`,
   );
 
+  // ── 14. Return summary ────────────────────────────────────────────────────
+  const filterNames = selectedPresets.map(p => p.name).join(", ");
   sdk.console.log(
-    `[delete_by_filter] ✓ Done. ${requestIds.length} request(s) removed. `,
+    `[delete_by_filter] ✓ Done. Deleted ${requestIds.length} requests that were HIDDEN by active filter(s): ${filterNames}.`,
   );
   
-  return `✅ Deleted ${requestIds.length} requests matching filter preset "${selectedPreset.name}". Please reselect your workspace (switch projects and switch back) to see the changes.`;
+  return `✅ Deleted ${requestIds.length} requests that were hidden by active filter(s): ${filterNames}. Please reselect your workspace (switch projects and switch back) to see the changes.`;
 }
