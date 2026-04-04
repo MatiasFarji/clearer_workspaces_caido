@@ -147,7 +147,7 @@ export async function run({ request }, sdk) {
     const project = await sdk.projects.getCurrent();
     if (!project) {
       sdk.console.error("[delete_by_filter] No active project. Aborting.");
-      return;
+      return "No active project. Aborting.";
     }
 
     const projectPath = project.getPath();
@@ -284,14 +284,14 @@ export async function run({ request }, sdk) {
     
   } catch (error) {
     sdk.console.error(`[delete_by_filter] Failed to get active filters: ${error.message}`);
-    return;
+    return `Failed to get active filters: ${error.message}`;
   }
 
   // ── 2. Get project paths ─────────────────────────────────────────────────
   const project = await sdk.projects.getCurrent();
   if (!project) {
     sdk.console.error("[delete_by_filter] No active project. Aborting.");
-    return;
+    return "No active project. Aborting.";
   }
 
   const projectPath = project.getPath();
@@ -307,7 +307,7 @@ export async function run({ request }, sdk) {
   const tables = await sqliteRun(dbPath, ".tables\n");
   if (!tables.includes("requests")) {
     sdk.console.error("[delete_by_filter] FATAL: 'requests' table not found.");
-    return;
+    return "FATAL: 'requests' table not found.";
   }
 
   // ── 4. Get database sizes before deletion ────────────────────────────────
@@ -342,7 +342,7 @@ export async function run({ request }, sdk) {
 
   if (!allRequestsRaw) {
     sdk.console.log("[delete_by_filter] No requests in DB. Nothing to do.");
-    return;
+    return "No requests in DB. Nothing to do.";
   }
 
   const allRequests = allRequestsRaw
@@ -405,7 +405,7 @@ export async function run({ request }, sdk) {
       sdk.console.log(`[delete_by_filter] Fetched ${edges.length} matching requests (total: ${shownIds.size})`);
     } catch (error) {
       sdk.console.error(`[delete_by_filter] GraphQL query failed: ${error.message}`);
-      return;
+      return `GraphQL query failed: ${error.message}`;
     }
   }
 
@@ -417,7 +417,7 @@ export async function run({ request }, sdk) {
 
   if (idsToDelete.length === 0) {
     sdk.console.log("[delete_by_filter] No requests to delete. Nothing to do.");
-    return;
+    return "No requests to delete. Nothing to do.";
   }
 
   // ── 8. Get full data for requests to delete ──────────────────────────────

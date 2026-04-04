@@ -139,7 +139,7 @@ export async function run({ request }, sdk) {
   const scopes = await sdk.scope.getAll();
   if (!scopes || scopes.length === 0) {
     sdk.console.warn("[workspace_clearer] No scopes configured. Aborting.");
-    return;
+    return "No scopes configured. Aborting.";
   }
 
   const allowPatterns = scopes.flatMap((s) => s.allowlist);
@@ -147,7 +147,7 @@ export async function run({ request }, sdk) {
 
   if (allowPatterns.length === 0 && denyPatterns.length === 0) {
     sdk.console.warn("[workspace_clearer] Scopes have no rules. Aborting.");
-    return;
+    return "Scopes have no rules. Aborting.";
   }
 
   sdk.console.log(
@@ -161,7 +161,7 @@ export async function run({ request }, sdk) {
   const project = await sdk.projects.getCurrent();
   if (!project) {
     sdk.console.error("[workspace_clearer] No active project. Aborting.");
-    return;
+    return "No active project. Aborting.";
   }
 
   const projectPath = project.getPath();
@@ -180,7 +180,7 @@ export async function run({ request }, sdk) {
   );
   if (!tables.includes("requests")) {
     sdk.console.error("[workspace_clearer] FATAL: 'requests' table not found.");
-    return;
+    return "FATAL: 'requests' table not found.";
   }
 
   // ── 4. Get database sizes before deletion ────────────────────────────────
@@ -213,7 +213,7 @@ export async function run({ request }, sdk) {
 
   if (!rawOutput) {
     sdk.console.log("[workspace_clearer] No requests in DB. Nothing to do.");
-    return;
+    return "No requests in DB. Nothing to do.";
   }
 
   const allRequests = rawOutput
@@ -256,7 +256,7 @@ export async function run({ request }, sdk) {
     sdk.console.log(
       "[workspace_clearer] All requests are in scope. Nothing to delete.",
     );
-    return;
+    return "All requests are in scope. Nothing to delete.";
   }
 
   sdk.console.log(
@@ -443,5 +443,6 @@ export async function run({ request }, sdk) {
     `[workspace_clearer] ✓ Done. ${requestIds.length} request(s) removed. `
   );
 
-  
+
+  return `✅ Deleted ${requestIds.length} requests out of scope: ${allowPatterns.join(", ")} || in blacklist: ${denyPatterns.join(", ")}. Please reselect your workspace (switch projects and switch back) to see the changes.`;
 }
